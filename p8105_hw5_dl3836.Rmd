@@ -1,0 +1,263 @@
+---
+title: "P8105 HW5"
+author: "Dan Li (dl3836)"
+output: github_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+## Problem 1
+
+We begin by creating a helper function that simulates birthdays for a specified
+group size and then reports whether the group contains at least one shared
+birthday.
+
+```{r birthday-function}
+set.seed(1234)
+
+birthday_shared <- function(group_size) {
+  birthdays <- sample(1:365, size = group_size, replace = TRUE)
+  any(duplicated(birthdays))
+}
+```
+
+Next, we apply this function across group sizes ranging from 2 through 50,
+replicating the simulation 10000 times per group size. The resulting dataset
+stores the empirical probability that a group of each size contains at least one
+pair of people who share a birthday.
+
+```{r birthday-sim}
+library(tidyverse)
+
+birthday_results <- 
+  expand_grid(group_size = 2:50, iter = 1:10000) %>%
+  mutate(shared_birthday = map_lgl(group_size, birthday_shared)) %>%
+  group_by(group_size) %>%
+  summarize(prob_shared = mean(shared_birthday), .groups = "drop")
+
+birthday_results
+```
+
+The plot below shows the estimated probability of at least one shared birthday
+as a function of group size.
+
+```{r birthday-plot, fig.height = 4, fig.width = 6}
+birthday_results %>%
+  ggplot(aes(x = group_size, y = prob_shared)) +
+  geom_line(color = "#006d2c", linewidth = 1) +
+  scale_x_continuous(breaks = seq(0, 50, by = 5)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Probability of a shared birthday by group size",
+    x = "Group size",
+    y = "Estimated probability"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+We see the well-known "birthday paradox": the probability of at least one
+shared birthday grows very quickly with group size. With roughly 23 people in a
+room, the probability exceeds 50%, and it approaches certainty for group sizes
+around 50.
+
+## Problem 2
+
+We now investigate the power of a one-sample *t*-test via simulation. The
+simulation fixes the sample size at $n = 30$, the population standard deviation
+at $\sigma = 5$, and considers true means $\mu \in \{0, 1, 2, 3, 4, 5, 6\}$.
+For each value of $\mu$, we generate 5000 datasets, compute the sample mean, and
+test $H_0: \mu = 0$ using a one-sample *t*-test with significance level 0.05.
+
+```{r power-sim}
+library(broom)
+
+sim_parameters <- tibble(mu = 0:6, sigma = 5, n = 30, iterations = 5000)
+
+power_results <- sim_parameters %>%
+  mutate(
+    sim_data = pmap(
+      list(mu = mu, sigma = sigma, n = n, iterations = iterations),
+      function(mu, sigma, n, iterations) {
+        rerun(iterations, tibble(x = rnorm(n, mean = mu, sd = sigma)))
+      }
+    ),
+    sim_tidy = map(sim_data, ~ map_dfr(., ~ tidy(t.test(.$x, mu = 0))))
+  ) %>%
+  unnest(sim_tidy) %>%
+  group_by(mu) %>%
+  summarize(
+    power = mean(p.value < 0.05),
+    mean_estimate = mean(estimate),
+    mean_estimate_reject = mean(estimate[p.value < 0.05]),
+    .groups = "drop"
+  )
+
+power_results
+```
+
+The figure below shows the relationship between the true mean and the power of
+the one-sample *t*-test.
+
+```{r power-plot, fig.height = 4, fig.width = 6}
+power_results %>%
+  ggplot(aes(x = mu, y = power)) +
+  geom_line(color = "#08519c", linewidth = 1) +
+  geom_point(color = "#08519c", size = 2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Power rises with the magnitude of the true mean",
+    x = "True mean",
+    y = "Estimated power"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+As expected, power increases with the size of the true mean. When the true mean
+is zero, power equals the nominal significance level (approximately 5%). As the
+true mean moves farther from zero, power increases steadily and approaches one
+for large effect sizes.
+
+Next we compare the average estimated mean with and without conditioning on
+rejecting the null hypothesis.
+
+```{r estimate-plot, fig.height = 4, fig.width = 6}
+power_results_long <- power_results %>%
+  select(mu, mean_estimate, mean_estimate_reject) %>%
+  pivot_longer(
+    cols = c(mean_estimate, mean_estimate_reject),
+    names_to = "estimate_type",
+    values_to = "estimate"
+  ) %>%
+  mutate(
+    estimate_type = recode(
+      estimate_type,
+      mean_estimate = "Average across all simulations",
+      mean_estimate_reject = "Average when null rejected"
+    )
+  )
+
+power_results_long %>%
+  ggplot(aes(x = mu, y = estimate, color = estimate_type)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("#238b45", "#cb181d")) +
+  labs(
+    title = "Average estimates with and without conditioning on rejection",
+    x = "True mean",
+    y = "Average estimated mean",
+    color = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+The unconditional average of $\hat{\mu}$ closely tracks the true mean, as the
+estimator is unbiased. However, conditioning on rejecting the null yields an
+average estimate that is systematically larger in magnitude than the true mean.
+This occurs because only samples with unusually large estimates tend to reject
+when the true effect is small, leading to selection (or "winner's curse") bias.
+
+## Problem 3
+
+We now analyze the homicide data compiled by *The Washington Post*. The raw data
+are stored locally in `data/homicide-data.csv`.
+
+```{r homicide-load}
+if (!file.exists("data/homicide-data.csv")) {
+  download.file(
+    url = "https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv",
+    destfile = "data/homicide-data.csv",
+    quiet = TRUE
+  )
+}
+
+homicides <- readr::read_csv("data/homicide-data.csv")
+```
+
+The dataset contains information on individual homicide cases, including the
+city, state, victim demographics, disposition, and other case details. We begin
+by creating a `city_state` variable and then summarizing the total number of
+homicides and the number that remain unsolved for each city.
+
+```{r homicide-summary}
+homicide_city_summary <- homicides %>%
+  mutate(city_state = str_c(city, ", ", state)) %>%
+  group_by(city_state) %>%
+  summarize(
+    total = n(),
+    unsolved = sum(disposition %in% c("Closed without arrest", "Open/No arrest")),
+    .groups = "drop"
+  )
+
+homicide_city_summary
+```
+
+For Baltimore, MD, we estimate the proportion of homicides that are unsolved
+using `prop.test`.
+
+```{r baltimore}
+baltimore_results <- homicides %>%
+  filter(city == "Baltimore", state == "MD") %>%
+  summarize(
+    total = n(),
+    unsolved = sum(disposition %in% c("Closed without arrest", "Open/No arrest"))
+  )
+
+baltimore_prop <- prop.test(
+  x = baltimore_results$unsolved,
+  n = baltimore_results$total
+)
+
+baltimore_tidy <- broom::tidy(baltimore_prop)
+
+baltimore_tidy %>%
+  select(estimate, conf.low, conf.high)
+```
+
+Finally, we repeat the proportion test for each city and collect the resulting
+estimates and confidence intervals into a tidy dataframe.
+
+```{r homicide-prop}
+city_prop_results <- homicides %>%
+  mutate(city_state = str_c(city, ", ", state)) %>%
+  group_by(city_state) %>%
+  summarize(
+    total = n(),
+    unsolved = sum(disposition %in% c("Closed without arrest", "Open/No arrest")),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    prop_test = map2(unsolved, total, ~ tidy(prop.test(.x, .y)))
+  ) %>%
+  unnest(prop_test)
+
+city_prop_results
+```
+
+The plot below shows the estimated proportion of unsolved homicides in each
+city, along with corresponding 95% confidence intervals.
+
+```{r homicide-plot, fig.height = 7, fig.width = 6}
+city_prop_results %>%
+  mutate(city_state = fct_reorder(city_state, estimate)) %>%
+  ggplot(aes(x = city_state, y = estimate)) +
+  geom_point(color = "#54278f") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2, color = "#54278f") +
+  labs(
+    title = "Estimated proportion of unsolved homicides by city",
+    x = NULL,
+    y = "Proportion unsolved"
+  ) +
+  coord_flip() +
+  theme_minimal(base_size = 11)
+```
+
+The visualization highlights substantial variation across cities in the share of
+homicide cases that remain unsolved, with some jurisdictions solving the vast
+majority of cases and others leaving more than half unresolved.
